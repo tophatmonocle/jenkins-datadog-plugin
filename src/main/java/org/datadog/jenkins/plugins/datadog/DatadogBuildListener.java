@@ -1,5 +1,7 @@
 package org.datadog.jenkins.plugins.datadog;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import com.timgroup.statsd.NonBlockingStatsDClient;
 import com.timgroup.statsd.StatsDClient;
 import com.timgroup.statsd.StatsDClientException;
@@ -22,6 +24,9 @@ import net.sf.json.JSONArray;
 import net.sf.json.JSONObject;
 import net.sf.json.JSONSerializer;
 
+import org.jenkinsci.plugins.workflow.job.views.FlowGraphTableAction;
+import org.jenkinsci.plugins.workflow.support.visualization.table.FlowGraphTable;
+
 import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.StaplerRequest;
 
@@ -32,8 +37,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 import java.util.concurrent.TimeUnit;
@@ -82,6 +87,7 @@ public class DatadogBuildListener extends RunListener<Run>
     static final Integer MAX_HOSTNAME_LEN = 255;
     private static final Logger logger = Logger.getLogger(DatadogBuildListener.class.getName());
     private static final Queue queue = Queue.getInstance();
+    private static ObjectMapper JSON = new ObjectMapper();
 
     /**
      * Runs when the {@link DatadogBuildListener} class is created.
@@ -165,6 +171,14 @@ public class DatadogBuildListener extends RunListener<Run>
 
     @Override
     public final void onCompleted(final Run run, @Nonnull final TaskListener listener) {
+        JenkinsStagesPayload payload = convertRunToJenkinsStagesPayload(run);
+        try {
+            String json = JSON.writeValueAsString(payload);
+            logger.info(json);
+        } catch (Exception e) {
+            logger.severe("JenkinsStagesPayload to json conversion failed");
+        }
+
         if (DatadogUtilities.isApiKeyNull()) {
             return;
         }
@@ -226,6 +240,29 @@ public class DatadogBuildListener extends RunListener<Run>
         }
     }
 
+    private JenkinsStagesPayload convertRunToJenkinsStagesPayload(Run run) {
+        JenkinsStagesPayload payload = null;
+        FlowGraphTableAction pipelineSteps = run.getAction(FlowGraphTableAction.class);
+
+        if (pipelineSteps != null) {
+            FlowGraphTable flowGraphTable = pipelineSteps.getFlowGraph();
+            List<FlowGraphTable.Row> rows = flowGraphTable.getRows();
+
+            for (int i = 0; i < rows.size(); i++) {
+                FlowGraphTable.Row row = rows.get(i);
+                if (row.getDisplayName().equals("Stage : Start")) {
+                    FlowGraphTable.Row stage = rows.get(i + 1);
+                    payload = new JenkinsStagesPayload.Builder()
+                            .stageName(stage.getNode().getDisplayName())
+                            .result(stage.getNode().getError() != null ? JenkinsStagesPayload.Result.SUCCESS : JenkinsStagesPayload.Result.FAILURE)
+                            .durationMilliSecond(stage.getDurationMillis())
+                            .build();
+                }
+            }
+        }
+
+        return payload;
+    }
 
     /**
      * Gathers build metadata, assembling it into a {@link JSONObject} before
